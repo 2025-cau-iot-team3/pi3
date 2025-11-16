@@ -1,0 +1,149 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+    <title>Pi 1 로봇 컨트롤러 (PC용)</title>
+    <style>
+        body { font-family: sans-serif; display: grid; justify-content: center; background: #f0f0f0; }
+        h1 { text-align: center; }
+        video { background: black; width: 640px; height: 480px; border: 1px solid #ccc; }
+        #controls { text-align: center; margin-top: 10px; }
+        button { font-size: 1.2em; padding: 10px 20px; margin: 5px; cursor: pointer; }
+        #status { font-size: 0.9em; color: #555; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Pi 1 로봇 컨트롤러 (PC용)</h1>
+    <video id="video" autoplay playsinline muted></video>
+
+    <div id="controls">
+        <button id="btnForward">▲ 전진</button>
+        <br>
+        <button id="btnLeft">◀ 좌회전</button>
+        <button id="btnStop">■ 정지</button>
+        <button id="btnRight">▶ 우회전</button>
+        <br>
+        <button id="btnBackward">▼ 후진</button>
+    </div>
+    <div id="status">상태: 연결 대기 중...</div>
+
+    <script>
+        // --- 1. Pi 1 서버의 IP 주소로 변경 ---
+        const PI_1_IP = "192.168.0.22"; 
+        const URI = `ws://${PI_1_IP}:8000`;
+        // ------------------------------------
+
+        const videoElement = document.getElementById('video');
+        const statusElement = document.getElementById('status');
+        let websocket;
+        let pc;
+
+        const motorCommands = {
+            "stop":     { "left": 0, "right": 0 },
+            "forward":  { "left": 80, "right": 80 },
+            "backward": { "left": -80, "right": -80 },
+            "left":     { "left": -60, "right": 60 },
+            "right":    { "left": 60, "right": -60 }
+        };
+
+        async function connect() {
+            statusElement.textContent = `서버 (${URI})에 연결 시도 중...`;
+            
+            // 1. WebSocket 연결
+            websocket = new WebSocket(URI);
+            
+            websocket.onopen = () => {
+                statusElement.textContent = "서버 연결 성공. WebRTC Offer 생성 중...";
+                startWebRTC();
+            };
+
+            websocket.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+                
+                if (data.command === "video_answer") {
+                    statusElement.textContent = "Answer 수신. P2P 연결 시도...";
+                    const answer = new RTCSessionDescription(data.payload);
+                    await pc.setRemoteDescription(answer);
+                    statusElement.textContent = "P2P 연결 완료! 스트림 수신 대기 중...";
+                    // Pi 3 코드와 달리, 웹 브라우저는 음소거를 해제해야 소리가 납니다.
+                    videoElement.muted = false; 
+                }
+            };
+
+            websocket.onclose = () => {
+                statusElement.textContent = "서버 연결 끊어짐.";
+                if (pc) pc.close();
+            };
+
+            websocket.onerror = (err) => {
+                statusElement.textContent = `연결 오류: ${err}`;
+            };
+        }
+
+        async function startWebRTC() {
+            pc = new RTCPeerConnection({
+                iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+            });
+
+            // 2. Pi 1로부터 트랙(영상/음성)을 수신
+            pc.addTransceiver("video", { direction: "recvonly" });
+            pc.addTransceiver("audio", { direction: "recvonly" });
+
+            // 3. 트랙 수신 시 <video> 태그에 연결
+            pc.ontrack = (event) => {
+                statusElement.textContent = `스트림(${event.track.kind}) 수신 시작!`;
+                if (event.streams && event.streams[0]) {
+                    videoElement.srcObject = event.streams[0];
+                }
+            };
+
+            // 4. Offer 생성 및 서버로 전송
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            // ICE Candidate 수집이 완료될 때까지 기다림 (Pi 3 코드와 동일)
+            await new Promise((resolve) => {
+                if (pc.iceGatheringState === 'complete') {
+                    resolve();
+                } else {
+                    pc.onicegatheringstatechange = () => {
+                        if (pc.iceGatheringState === 'complete') {
+                            resolve();
+                        }
+                    };
+                }
+            });
+
+            const offerCommand = {
+                source: "pc_web_controller",
+                command: "video_offer",
+                payload: { sdp: pc.localDescription.sdp, type: pc.localDescription.type }
+            };
+            websocket.send(JSON.stringify(offerCommand));
+            statusElement.textContent = "Offer 전송 완료. Answer 대기 중...";
+        }
+
+        // 5. 모터 제어 명령 전송
+        function sendMotorCommand(commandName) {
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                const command = {
+                    source: "pc_web_controller",
+                    command: "motor_control",
+                    payload: motorCommands[commandName]
+                };
+                websocket.send(JSON.stringify(command));
+                console.log(`Motor Command Sent: ${commandName}`);
+            }
+        }
+
+        // 버튼 이벤트 연결
+        document.getElementById('btnStop').onclick = () => sendMotorCommand('stop');
+        document.getElementById('btnForward').onclick = () => sendMotorCommand('forward');
+        document.getElementById('btnBackward').onclick = () => sendMotorCommand('backward');
+        document.getElementById('btnLeft').onclick = () => sendMotorCommand('left');
+        document.getElementById('btnRight').onclick = () => sendMotorCommand('right');
+        
+        // 페이지 로드 시 바로 연결 시작
+        connect();
+    </script>
+</body>
+</html>

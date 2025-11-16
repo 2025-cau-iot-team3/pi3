@@ -3,35 +3,41 @@ import json
 import logging
 import cv2
 import websockets
-from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaRecorder
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 import threading
 import queue
+import pyaudio
+
+# 라이브러리 설치
+# sudo apt-get install portaudio19-dev
+# python3 -m venv venv --system-site-packages
+# source venv/bin/activate
+# pip install opencv-python aiortc websockets pyaudio
 
 # Pi 1 서버의 IP 주소로 변경
-# $ ip addr
-PI_1_IP = "192.168.0.19" 
+PI_1_IP = "192.168.0.22" 
 URI = f"ws://{PI_1_IP}:8000"
-SPEAKER_NAME = "pipewire"
+
+config = RTCConfiguration(
+    iceServers=[
+        RTCIceServer("stun:stun.l.google.com:19302")
+    ]
+)
+
+pc = RTCPeerConnection(configuration=config)
 
 frame_queue = queue.Queue()
-pc = RTCPeerConnection()
 active_recorders = set()
-audio_player = None
-# 
-# 라이브러리 설치
-# pip install opencv-python aiortc websockets
+audio_stream = None
 
-# 'av'가 'pulse'를 지원하도록 빌드하기 위한 종속성 설치 (Debian/Ubuntu 기준)
-# sudo apt-get install libavdevice-dev
-# pip uninstall av
-# pip install av --no-binary av
+p = pyaudio.PyAudio()
+CHUNK_SIZE = 1024
 
 @pc.on("track")
 def on_track(track):
-    global audio_player
-    print(f"✅ Pi 1로부터 트랙({track.kind}) 수신 시작!")
-    # 비디오 프레임을 수신하여 큐에 넣는 비동기 함수
+    global audio_stream
+    print(f"Pi 1로부터 트랙({track.kind}) 수신 시작!")
+    # 비디오 트랙 수신 처리
     async def display_video(track):
         while True:
             try:
@@ -42,24 +48,39 @@ def on_track(track):
             except Exception as e:
                 print(f"[영상 수신 에러] {e}")
                 break
-    # 오디오 트랙을 PipeWire를 통해 재생하는 비동기 함수
-    async def start_speaker_playback(track_copy):
-        global audio_player
-        try:
-            audio_player = MediaRecorder(SPEAKER_NAME, format="pulse")
-            audio_player.addTrack(track_copy)
-            active_recorders.add(audio_player)
-            print(f"[오디오] Pi 3 스피커 ({SPEAKER_NAME}) 재생 '시작'...")
-            await audio_player.start()
-        except Exception as e:
-            print(f"[오디오] 시작 실패: {e}")
 
     if track.kind == "video":
         asyncio.create_task(display_video(track))
-    #if track.kind == "audio":
-        #asyncio.create_task(start_speaker_playback(track))
+    if track.kind == "audio":
+        async def play_audio(track):
+            global audio_stream
+            try:
+                frame = await track.recv()
+                audio_stream = p.open(
+                    format=p.get_format_from_width(frame.format.bytes),
+                    channels=len(frame.layout.channels),
+                    rate=frame.sample_rate,
+                    output=True,
+                    frames_per_buffer=CHUNK_SIZE
+                )
+                print(f"[오디오] PyAudio 스피커({frame.sample_rate}Hz) 재생 시작.")
+                while True:
+                    frame = await track.recv()
+                    await asyncio.to_thread(
+                        audio_stream.write, 
+                        frame.to_ndarray().tobytes()
+                    )
+            except Exception as e:
+                print(f"   [오디오] PyAudio 재생 실패: {e}")
+            finally:
+                if audio_stream:
+                    audio_stream.stop_stream()
+                    audio_stream.close()
+                print("   [오디오] PyAudio 스트림 종료.")
 
-# Pi 1 서버에 모터 제어 명령을 주기적으로 전송하는 함수
+        asyncio.create_task(play_audio(track))
+
+
 async def send_motor_commands(websocket):
     while True:
         try:
@@ -74,12 +95,7 @@ async def send_motor_commands(websocket):
             break
 
 # Pi 1 서버와 시그널링 및 상태 업데이트를 처리하는 함수
-async def handle_signaling_and_status(websocket):
-    """
-    WebSocket에 접속하자마자 Pi 3가 'Offer'를 생성하고,
-    ICE Gathering이 완료될 때까지 기다렸다가 보냅니다.
-    """
-    
+async def handle_signaling_and_status(websocket):    
     print("[WebRTC] Offer(1단계) 생성 중...")
     pc.addTransceiver("video", direction="recvonly")
     pc.addTransceiver("audio", direction="recvonly")
@@ -124,7 +140,6 @@ async def handle_signaling_and_status(websocket):
 async def main_async():
     logging.basicConfig(level=logging.INFO)
     print(f"Pi 1 서버 ({URI})에 연결 시도 중...")
-
     try:
         async with websockets.connect(URI) as websocket:
             print("Pi 1 서버에 성공적으로 연결되었습니다.")
