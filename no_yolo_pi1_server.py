@@ -6,8 +6,8 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, R
 from aiortc.contrib.media import MediaPlayer
 import av
 from picamera2 import Picamera2
-from yolo_detector import YoloDetector
-import cv2
+#from yolo_detector import YoloDetector
+#import cv2
 
 # 라이브러리 설치
 # sudo apt-get install python3-picamera2
@@ -17,8 +17,8 @@ import cv2
 
 # 'pactl list sources'에서 찾은 마이크 이름
 PULSE_DEVICE_NAME = "alsa_input.usb-TTGK_Technology_Hi-MAX_330212CA241009-00.mono-fallback"
-YOLO_MODEL_PATH = "/home/hunseok/yolov8n.onnx"
-YOLO_INTERVAL = 5.0 # 5초마다 실행
+#YOLO_MODEL_PATH = "/home/hunseok/yolov8n.onnx"
+#YOLO_INTERVAL = 5.0 # 5초마다 실행
 
 active_players = set()
 clients = {
@@ -33,7 +33,7 @@ config = RTCConfiguration(
 )
 
 global_picam2 = None
-global_yolo = None
+#global_yolo = None
 
 class Picamera2VideoStreamTrack(VideoStreamTrack):
     # Picamera2를 사용하여 비디오 프레임을 캡처하고 스트리밍하는 트랙
@@ -168,7 +168,7 @@ async def handler(websocket):
                      mic_player.audio.stop()
             except Exception as e:
                 print(f"오디오 정리 중 에러 (무시): {e}")
-
+'''
 async def run_background_yolo():
     print("백그라운드 YOLO 감시 루프 시작...")
     while True:
@@ -192,7 +192,7 @@ async def run_background_yolo():
         except Exception as e:
             print(f"YOLO 루프 에러: {e}")
             await asyncio.sleep(5) # 에러 시 5초 대기
-
+'''
 async def main():
     logging.basicConfig(level=logging.INFO)
     global global_picam2, global_yolo
@@ -205,10 +205,10 @@ async def main():
     global_picam2.start()
     print("Picamera2 카메라 초기화 완료.")
     # 2. YOLO 초기화 (5초 간격 설정)
-    global_yolo = YoloDetector(YOLO_MODEL_PATH, interval_seconds=YOLO_INTERVAL)
+    #global_yolo = YoloDetector(YOLO_MODEL_PATH, interval_seconds=YOLO_INTERVAL)
 
     # 3. 백그라운드 YOLO 태스크 시작 (서버와 동시에 돔)
-    asyncio.create_task(run_background_yolo())
+    #asyncio.create_task(run_background_yolo())
 
     try:
         async with websockets.serve(handler, "0.0.0.0", 8000):
