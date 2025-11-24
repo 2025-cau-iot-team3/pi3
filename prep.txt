@@ -23,3 +23,4 @@ pip install websockets aiortc
 #실행
 $ source yolov8-env/bin/activate
 $ python3 no_yolo_pi1_server.py
+firefox에서 index.html 열기
