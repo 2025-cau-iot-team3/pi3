@@ -8,6 +8,7 @@ import av
 from picamera2 import Picamera2
 from yolo_detector import YoloDetector
 import cv2
+import os
 
 # 라이브러리 설치
 # sudo apt-get install python3-picamera2
@@ -17,13 +18,15 @@ import cv2
 
 # 'pactl list sources'에서 찾은 마이크 이름
 PULSE_DEVICE_NAME = "alsa_input.usb-TTGK_Technology_Hi-MAX_330212CA241009-00.mono-fallback"
-YOLO_MODEL_PATH = "/home/hunseok/yolov8n.onnx"
+YOLO_MODEL_PATH = "/home/iotuser/yolov8n.onnx"
 YOLO_INTERVAL = 5.0 # 5초마다 실행
+SENSOR_FILE_PATH = "../pi2/sensor/sensor_state"
 
 active_players = set()
 clients = {
     "pi2_hardware": None,
-    "pi3_controller": None
+    "pi3_controller": None,
+    "pi4_controller": None,
 }
 
 config = RTCConfiguration(
@@ -34,6 +37,7 @@ config = RTCConfiguration(
 
 global_picam2 = None
 global_yolo = None
+global_mic = None
 
 class Picamera2VideoStreamTrack(VideoStreamTrack):
     # Picamera2를 사용하여 비디오 프레임을 캡처하고 스트리밍하는 트랙
@@ -64,6 +68,33 @@ def create_pi_microphone_player():
     print(f"오디오 장치 '{PULSE_DEVICE_NAME}' (PulseAudio)를 엽니다...")
     return MediaPlayer(PULSE_DEVICE_NAME, format="pulse", options = {'rate':'8000', 'channels':'1'})
 
+# 센서 파일 모니터링
+async def run_sensor_monitor():
+    print("센서 모니터링 시작")
+    last_mod_time = 0
+    while True:
+        try:
+            if os.path.exists(SENSOR_FILE_PATH):
+                with open(SENSOR_FILE_PATH, "r") as f:
+                    sensor_data = json.load(f)
+
+                if clients["pi2_hardware"]:
+                    msg = {
+                        "source": "pi1_server",
+                        "command": "sensor_update",
+                        "payload": sensor_data
+                    }
+                    await clients["pi2_hardware"].send(json.dumps(msg))
+            else:
+                pass
+        except json.JSONDecodeError:
+            pass # 파일 쓰는 중
+        except Exception as e:
+            print(f"센서 읽기 에러: {e}", e)
+        await asyncio.sleep(0.1)
+
+
+
 # WebSocket 핸들러 함수
 async def handler(websocket):
     print(f"클라이언트 연결됨: {websocket.remote_address}")
@@ -81,23 +112,15 @@ async def handler(websocket):
     try:
         cam_track = Picamera2VideoStreamTrack()
         pc.addTrack(cam_track)
+        if global_mic and global_mic.audio:
+            pc.addTrack(global_mic.audio)
+        else:
+            print("오디오 장치가 준비되지 않음")
 
     except Exception as e:
         print(f"카메라 장치 로드 실패: {e}")
         await websocket.close(code=1011, reason="Camera Error")
         return
-    try:
-        mic_player = create_pi_microphone_player()
-        if mic_player and mic_player.audio:
-            active_players.add(mic_player)
-            pc.addTrack(mic_player.audio)
-            print("오디오 트랙 추가 완료.")
-        else:
-            print("오디오 트랙을 찾을 수 없습니다. (영상만 전송합니다)")
-            mic_player = None
-    except Exception as e:
-        print(f"오디오 장치 연결 실패 (무시하고 진행): {e}")
-        mic_player = None
 
     try:
         async for message in websocket:
@@ -121,6 +144,9 @@ async def handler(websocket):
                         await pi2_ws.send(message)
                     else:
                         print("Pi 2가 연결되어 있지 않아 명령을 보낼 수 없습니다.")
+
+                elif command in ["get_weather_by_city", "get_current_time", "start_timer"]:
+                    print(f"Pi 4 명령 수신: {command}")
 
                 elif command == "video_offer":
                     print("[WebRTC] Offer(1단계) 수신")
@@ -158,17 +184,6 @@ async def handler(websocket):
             except Exception as e:
                 print(f"카메라 정리 중 에러: {e}")
 
-        if mic_player:
-            if mic_player in active_players:
-                active_players.remove(mic_player)
-            try:
-                if hasattr(mic_player, 'stop'):
-                    mic_player.stop()
-                elif hasattr(mic_player, 'audio') and mic_player.audio:
-                     mic_player.audio.stop()
-            except Exception as e:
-                print(f"오디오 정리 중 에러 (무시): {e}")
-
 async def run_background_yolo():
     print("백그라운드 YOLO 감시 루프 시작...")
     while True:
@@ -195,7 +210,7 @@ async def run_background_yolo():
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    global global_picam2, global_yolo
+    global global_picam2, global_yolo, global_mic
     global_picam2 = Picamera2()
     config_cam = global_picam2.create_video_configuration(
         main={"size": (640, 480)},
@@ -204,11 +219,15 @@ async def main():
     global_picam2.configure(config_cam)
     global_picam2.start()
     print("Picamera2 카메라 초기화 완료.")
+
+    global_mic = create_pi_microphone_player();
+    print("마이크 시작됨")
     # 2. YOLO 초기화 (5초 간격 설정)
     global_yolo = YoloDetector(YOLO_MODEL_PATH, interval_seconds=YOLO_INTERVAL)
 
     # 3. 백그라운드 YOLO 태스크 시작 (서버와 동시에 돔)
     asyncio.create_task(run_background_yolo())
+    asyncio.create_task(run_sensor_monitor())
 
     try:
         async with websockets.serve(handler, "0.0.0.0", 8000):
